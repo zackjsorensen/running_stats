@@ -11,9 +11,22 @@ import sys
 from datetime import datetime
 import os
 import pandas as pd
+from config import sb_key, sb_url
+from supabase import create_client, Client
 
 
 # Takes in a list of tuples of events, and scrapes all of those events and puts the results in csvs, one per meet
+
+def set_up(url):
+    options = webdriver.ChromeOptions()
+    options.binary_location = "/usr/bin/google-chrome"
+    service = Service("/home/zack/byu/cs452/running/chromedriver-linux64/chromedriver")
+    options.add_argument('--headless')  # run in background
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.get(url)
+    sleep(2)
+    return driver
+
 
 def time_to_seconds(time_str):
     if not time_str or time_str.strip() in {"", "DNF", "DNS"}:
@@ -32,8 +45,8 @@ def time_to_seconds(time_str):
         return None
 
 
-def get_grad_year(grade: str, date:datetime):
-    year = date.year
+def get_grad_year(grade: str, date:datetime)-> int:
+    year = int(date.year)
     if grade == "Fr":
         return year + 4
     elif grade == "So":
@@ -43,26 +56,24 @@ def get_grad_year(grade: str, date:datetime):
     elif grade == "Sr":
         return year + 1
     else:
-        return float('nan')
+        return None
 
 
-def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, gender, date, i):
-    options = webdriver.ChromeOptions()
-    options.binary_location = "/usr/bin/google-chrome"
-    service = Service("/home/zack/byu/cs452/running/chromedriver-linux64/chromedriver")
-    options.add_argument('--headless')  # run in background
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.get(url)
+def safe_grad_year(row):
+    try:
+        year_val = row['Year']
+        if isinstance(year_val, str):
+            return get_grad_year(year_val.strip(), row['Date'])
+    except Exception as e:
+        print(f"Bad row: {row['Year']}, {row['Date']}, error: {e}")
+        return None
+
+
+def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, gender, date, i, df_list):
+    driver = set_up(url)
     sleep(2)
-
-    if meet_id is None:
-        meet_id = float('nan')
-    if event_id is None:
-        event_id = float('nan')
-
     rows = driver.find_elements("tag name", "tr")
 
-    all_data = []
     data = []
     columns = []
     for j, row in enumerate(rows):
@@ -82,40 +93,23 @@ def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, ge
             if len(values) == len(columns):
 
                 data.append(values)
-            else:
-                print("Error: skipped malformed row")
-                print(values)
+            # else:
+            #     print("Error: skipped malformed row")
+                # print(values)
 
     df = pd.DataFrame(data, columns = columns)
     df["Time_Seconds"] = df["Time"].apply(time_to_seconds)
+    df["Graduation_Year"] = df.apply(safe_grad_year, axis=1)
+    df_list.append(df)
 
-    pd.set_option('display.max_columns', None)
-    print(df.head(20))
-
-
-    # bucket = i//10
-    # directory_name = "data_" + str(bucket)
-    # os.makedirs(directory_name, exist_ok=True)
-    #
-    # # filename =  "data_" + str(bucket) + "/" + meet_name + ".csv"
-    # with open(os.path.join(directory_name, (meet_name) + ".csv"), "w") as csvfile:
-    #     writer = csv.writer(csvfile)
-    #     writer.writerow(header)
-    #     writer.writerows(all_data)
 
 
 def sel_scrape_meet(url, meet_name, meet_id, location, date, i):
-    options = webdriver.ChromeOptions()
-    options.binary_location = "/usr/bin/google-chrome"
-    service = Service("/home/zack/byu/cs452/running/chromedriver-linux64/chromedriver")
-    options.add_argument('--headless')  # run in background
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.get(url)
-    sleep(2)
+    driver = set_up(url)
     anchors = driver.find_elements("tag name", "a")
     links = []
 
-    gender = "None"
+
     for anchor in anchors:
         if "Boys" in anchor.text:
             gender = "Boys"
@@ -124,15 +118,36 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date, i):
             gender = "Girls"
             links.append((anchor.text, anchor.get_attribute("href"), gender))
 
-
-    for link in links[:2]:
-
+    df_list = []
+    for link in links[:5]:
         match = re.search(r'eventId=.*', link[1])
         if match:
             event_id = match.group(0)[8:43]
         else:
-            event_id = "None"
-        sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, i)
+            event_id = None
+        sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, i, df_list)
+
+    if df_list:
+        combined_df = pd.concat(df_list)
+        combined_df = combined_df.drop(combined_df.columns[8], axis = 1)
+        athletes_df = combined_df[['Name', 'Graduation_Year', 'Team', 'Gender']].drop_duplicates()
+        athletes_df.rename(columns={"Gender": "gender"}, inplace=True)
+        athletes_df.rename(columns={"Graduation_Year": "graduation_year"}, inplace=True)
+        athletes_df.rename(columns={"Name": "name"}, inplace=True)
+        athletes_df.rename(columns={"Team": "team"}, inplace=True)
+
+        athletes_df['graduation_year'] = athletes_df['graduation_year'].astype('Int64')
+
+
+        # connect
+        supabase: Client = create_client(sb_url, sb_key)
+        athlete_records = athletes_df.to_dict(orient='records')
+        with open("output.txt", "w") as file:
+            file.write(str(athlete_records))
+
+        data = supabase.table("athlete").insert(athlete_records).execute()
+        print(data)
+
 
 
 
@@ -140,10 +155,12 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Please provide a filename containing the json string")
     else:
+
+
         with open(sys.argv[1], "r") as file:
             json_string = file.read()
             meets = json.loads(json_string)
-            for i, meet in enumerate(meets[:2]):
+            for i, meet in enumerate(meets[:5]):
                 pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
                 meet_id = re.search(pattern1, meet[3])
                 if not meet_id:
