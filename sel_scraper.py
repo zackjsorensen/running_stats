@@ -13,6 +13,7 @@ import os
 import pandas as pd
 from config import sb_key, sb_url
 from supabase import create_client, Client
+from selenium.webdriver.support import expected_conditions as EC
 
 
 # Takes in a list of tuples of events, and scrapes all of those events and puts the results in csvs, one per meet
@@ -24,7 +25,7 @@ def set_up(url):
     options.add_argument('--headless')  # run in background
     driver = webdriver.Chrome(service=service, options=options)
     driver.get(url)
-    sleep(2)
+    sleep(0.5)
     return driver
 
 
@@ -69,9 +70,15 @@ def safe_grad_year(row):
         return None
 
 
-def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, gender, date, i, df_list):
+def wait_for_table(driver):
+    WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.TAG_NAME, "tr"))
+    )
+
+
+def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, gender, date, df_list):
     driver = set_up(url)
-    sleep(2)
+    wait_for_table(driver)
     rows = driver.find_elements("tag name", "tr")
 
     data = []
@@ -104,7 +111,7 @@ def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, ge
 
 
 
-def sel_scrape_meet(url, meet_name, meet_id, location, date, i):
+def sel_scrape_meet(url, meet_name, meet_id, location, date):
     driver = set_up(url)
     anchors = driver.find_elements("tag name", "a")
     links = []
@@ -125,16 +132,18 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date, i):
             event_id = match.group(0)[8:43]
         else:
             event_id = None
-        sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, i, df_list)
+        sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, df_list)
 
     if df_list:
         combined_df = pd.concat(df_list)
         combined_df = combined_df.drop(combined_df.columns[8], axis = 1)
         athletes_df = combined_df[['Name', 'Graduation_Year', 'Team', 'Gender']].drop_duplicates()
-        athletes_df.rename(columns={"Gender": "gender"}, inplace=True)
-        athletes_df.rename(columns={"Graduation_Year": "graduation_year"}, inplace=True)
-        athletes_df.rename(columns={"Name": "name"}, inplace=True)
-        athletes_df.rename(columns={"Team": "team"}, inplace=True)
+        athletes_df = athletes_df.rename(columns={
+            "Gender": "gender",
+            "Graduation_Year": "graduation_year",
+            "Name": "name",
+            "Team": "team"
+        })
 
         athletes_df['graduation_year'] = athletes_df['graduation_year'].astype('Int64')
 
@@ -149,24 +158,21 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date, i):
         print(data)
 
 
+"""takes in a json file that contains the links to all meets in a year, and scrapes them"""
+def scrape_year(filename):
+    with open(filename, "r") as file:
+        json_string = file.read()
+        meets = json.loads(json_string)
+        for i, meet in enumerate(meets[:5]):
+            pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+            meet_id = re.search(pattern1, meet[3])
+            if not meet_id:
+                meet_id = re.search(r'\d{6,7}', meet[3])
+            date_str = meet[2].split("--")[-1].strip()
+            date = datetime.strptime(date_str, "%B %d, %Y").date()
+
+            
+            sel_scrape_meet(url=meet[3], meet_name=meet[0], meet_id=meet_id.group(0), location=meet[1], date=date)
 
 
-if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Please provide a filename containing the json string")
-    else:
-
-
-        with open(sys.argv[1], "r") as file:
-            json_string = file.read()
-            meets = json.loads(json_string)
-            for i, meet in enumerate(meets[:5]):
-                pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
-                meet_id = re.search(pattern1, meet[3])
-                if not meet_id:
-                    meet_id = re.search(r'\d{6,7}', meet[3])
-                date_str = meet[2].split("--")[-1].strip()
-                date = datetime.strptime(date_str, "%B %d, %Y").date()
-
-                sel_scrape_meet(url = meet[3], meet_name = meet[0], meet_id=meet_id.group(0), location = meet[1], date = date, i =i)
-
+scrape_year("2022_meets.json")
