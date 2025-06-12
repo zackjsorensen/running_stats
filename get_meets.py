@@ -8,7 +8,7 @@ import csv
 import json
 import re
 import sys
-
+import sel_scraper
 
 options = webdriver.ChromeOptions()
 options.binary_location = "/usr/bin/google-chrome"
@@ -57,7 +57,12 @@ def get_meets(url):
                 if location:
                     if "UT" in location: # or any(month in date for month in ("November", "December")): # to include regionals and nationals
                         if any(month in date for month in ("July", "August", "September", "October", "November", "December")):
-                            events.append((event_name, location, date, result_link))
+
+                            event_id = get_meet_id(result_link)
+                            races = find_races(event_name, location, date, result_link)
+                            if races:
+                                events.append((event_name, event_id, location, date, result_link, races))
+
                 i += 2  # Skip to next event row
             else:
                 i += 1
@@ -74,6 +79,40 @@ def get_meets(url):
     with open(filename, "w") as file:
 
         file.write(json.dumps(events))
+
+
+def find_races(meet_name, location, date, url):
+    driver = sel_scraper.set_up(url)
+    anchors = driver.find_elements("tag name", "a")
+    races = []
+
+    for anchor in anchors:
+        if "Boys" in anchor.text or "Girls" in anchor.text:
+            race_link = anchor.get_attribute("href")
+            race_id = get_event_id(race_link)
+            races.append((anchor.text, race_id, race_link))
+    if races:
+        return races
+
+
+def get_event_id(link):
+
+    match = re.search(r'eventId=.*', link)
+    if match:
+        event_id = match.group(0)[8:43]
+    else:
+        event_id = None
+    return event_id
+
+def get_meet_id(link):
+
+    match = re.search(r'meetId=.*', link)
+    if match:
+        event_id = match.group(0)[8:43]
+    else:
+        event_id = None
+    return event_id
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:

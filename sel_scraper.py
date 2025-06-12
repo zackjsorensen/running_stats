@@ -2,14 +2,11 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from time import sleep
-import csv
+import numpy as np
 import json
 import re
-import sys
 from datetime import datetime
-import os
 import pandas as pd
 from config import sb_key, sb_url
 from supabase import create_client, Client
@@ -111,11 +108,11 @@ def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, ge
 
 
 
+
 def sel_scrape_meet(url, meet_name, meet_id, location, date):
     driver = set_up(url)
     anchors = driver.find_elements("tag name", "a")
     links = []
-
 
     for anchor in anchors:
         if "Boys" in anchor.text:
@@ -127,6 +124,7 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
 
     df_list = []
     for link in links[:5]:
+        meet_url = link[1]
         match = re.search(r'eventId=.*', link[1])
         if match:
             event_id = match.group(0)[8:43]
@@ -144,35 +142,115 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
             "Name": "name",
             "Team": "team"
         })
-
+        combined_df = combined_df.rename(columns={
+            "Gender": "gender",
+            "Graduation_Year": "graduation_year",
+            "Name": "name",
+            "Team": "team"
+        })
         athletes_df['graduation_year'] = athletes_df['graduation_year'].astype('Int64')
+        return combined_df, athletes_df
 
 
-        # connect
-        supabase: Client = create_client(sb_url, sb_key)
-        athlete_records = athletes_df.to_dict(orient='records')
-        with open("output.txt", "w") as file:
-            file.write(str(athlete_records))
 
-        data = supabase.table("athlete").insert(athlete_records).execute()
-        print(data)
+def process_year_doc(meet):
+    pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+    meet_id = re.search(pattern1, meet[4])
+    if not meet_id:
+        meet_id = re.search(r'\d{6,7}', meet[3])
+    date_str = meet[3].split("--")[-1].strip()
+    date = datetime.strptime(date_str, "%B %d, %Y").date()
+    return date, meet_id
+
+
+def multiset_diff(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return rows in df_a minus those in df_b, counting duplicates:
+      - if a row appears 3× in df_a and 1× in df_b, result has it 2×
+      - if it appears <= times in df_b, it’s dropped entirely
+    """
+    # get value_counts Series for each
+    vc_a = df_a.value_counts().rename("count_a")
+    vc_b = df_b.value_counts().rename("count_b")
+
+    # combine, subtract counts
+    diff = (
+        pd.concat([vc_a, vc_b], axis=1, sort=False)
+          .fillna(0)
+    )
+    diff["leftover"] = (diff["count_a"] - diff["count_b"]).clip(lower=0)
+
+    # keep only positive leftovers
+    diff = diff[diff["leftover"] > 0]
+
+    # rebuild a DataFrame by repeating each row ‘leftover’ times
+    rows = []
+    for idx, row in diff.iterrows():
+        # idx is a tuple of column-values in the same order as df.columns
+        for _ in range(int(row["leftover"])):
+            rows.append(dict(zip(df_a.columns, idx)))
+
+    return pd.DataFrame(rows, columns=df_a.columns)
 
 
 """takes in a json file that contains the links to all meets in a year, and scrapes them"""
-def scrape_year(filename):
+def scrape_year(filename: str, batch_start: int, batch_end: int):
     with open(filename, "r") as file:
         json_string = file.read()
         meets = json.loads(json_string)
-        for i, meet in enumerate(meets[:5]):
-            pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
-            meet_id = re.search(pattern1, meet[3])
-            if not meet_id:
-                meet_id = re.search(r'\d{6,7}', meet[3])
-            date_str = meet[2].split("--")[-1].strip()
-            date = datetime.strptime(date_str, "%B %d, %Y").date()
-
-            
-            sel_scrape_meet(url=meet[3], meet_name=meet[0], meet_id=meet_id.group(0), location=meet[1], date=date)
 
 
-scrape_year("2022_meets.json")
+    supabase: Client = create_client(sb_url, sb_key)
+    response = supabase.table("athlete").select("*").execute()
+    athlete_df = pd.DataFrame(response.data)
+
+    for i, meet in enumerate(meets[batch_start:batch_end]):
+        date, meet_id = process_year_doc(meet)
+
+        meet_performances_df, meet_athlete_df = sel_scrape_meet(url=meet[4], meet_name=meet[0], meet_id=meet_id.group(0), location=meet[2], date=date)
+        # find new athletes
+        cols = ["name", "graduation_year", "team", "gender"]
+        new_athletes = multiset_diff(meet_athlete_df[cols], athlete_df[cols])
+        new_athletes.drop_duplicates(inplace=True)
+        if not new_athletes.empty:
+
+            new_athletes['graduation_year'] = new_athletes['graduation_year'].astype('Int64')
+            records = new_athletes.to_dict(orient="records")
+            supabase.table("athlete").insert(records).execute()
+        athlete_df = pd.DataFrame(
+            supabase.table("athlete").select("*").execute().data
+        )
+
+        sleep(2)
+        res = supabase.table("athlete").select("*").execute()
+        updated_athletes = pd.DataFrame(res.data)
+        merged_df = pd.merge(meet_performances_df, updated_athletes, on= ['gender', 'name', 'team', 'graduation_year'], how = 'inner')
+        merged_df['graduation_year'] = merged_df['graduation_year'].astype('Int64')
+        merged_df['Date'] = merged_df['Date'].astype(str)
+        cols_to_keep = ['Date', 'Event_ID', 'Meet_ID', "Place", "Team_Place", "Time_Seconds", "id"]
+        merged_df = merged_df[cols_to_keep]
+        merged_df = merged_df.rename(columns = {
+            "Date": "date",
+            "Event_ID": "event_id",
+            "Meet_ID": "meet_id",
+            "Place": "place",
+            "Team_Place": "team_place",
+            "Time_Seconds": "time_seconds",
+            "id": "athlete_id"
+        })
+
+        merged_df = merged_df[np.isfinite(merged_df.select_dtypes(include=[np.number])).all(axis=1)]
+
+
+        records = merged_df.to_dict(orient="records")
+        print(merged_df.columns.tolist())
+
+        print(records[:3])
+        supabase.table("performance").insert(records).execute()
+
+
+
+scrape_year("2022_meets.json", 0, 2)
+
+
+
