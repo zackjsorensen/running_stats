@@ -124,12 +124,28 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
 
     df_list = []
     for link in links[:5]:
-        meet_url = link[1]
+
+
         match = re.search(r'eventId=.*', link[1])
         if match:
-            event_id = match.group(0)[8:43]
-        else:
-            event_id = None
+            # Define the regex pattern for a canonical UUID (with hyphens)
+            uuid_pattern = re.compile(
+                r'\b'  # word boundary to ensure a clean match
+                r'[0-9a-fA-F]{8}-'  # 8 hex digits followed by a hyphen
+                r'[0-9a-fA-F]{4}-'  # 4 hex digits + hyphen
+                r'[0-9a-fA-F]{4}-'  # 4 hex digits + hyphen
+                r'[0-9a-fA-F]{4}-'  # 4 hex digits + hyphen
+                r'[0-9a-fA-F]{12}'  # 12 hex digits
+                r'\b'  # word boundary
+            )
+            # Example usage:
+            sample_text = "Here is a UUID: 550e8400-e29b-41d4-a716-446655440000 and another one."
+            uuid_match = uuid_pattern.search(match.group(0))
+
+            if uuid_match:
+                event_id = uuid_match.group(0)
+            else:
+                event_id = None
         sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, df_list)
 
     if df_list:
@@ -226,6 +242,31 @@ def scrape_year(filename: str, batch_start: int, batch_end: int):
         updated_athletes = pd.DataFrame(res.data)
         merged_df = pd.merge(meet_performances_df, updated_athletes, on= ['gender', 'name', 'team', 'graduation_year'], how = 'inner')
         merged_df['graduation_year'] = merged_df['graduation_year'].astype('Int64')
+
+        merged_df['Place'] = merged_df['Place'].astype(str).str.strip()
+        merged_df['Team_Place'] = merged_df['Team_Place'].astype(str).str.strip()
+
+        merged_df['Place'] = merged_df['Place'].replace('DNS', -1)
+        merged_df['Team_Place'] = merged_df['Team_Place'].replace('DNS', -1)
+        merged_df['Place'] = (
+            merged_df['Place']
+            .astype(str)
+            .str.strip()
+            .str.rstrip('.')
+            .replace({'DNS': -1, 'DNF': -1})  # Add DNF too, just in case
+        )
+        merged_df['Place'] = pd.to_numeric(merged_df['Place'])
+
+        merged_df['Team_Place'] = (
+            merged_df['Team_Place']
+            .astype(str)
+            .str.strip()
+            .str.rstrip('.')
+            .replace({'': -1, 'DNS': -1, 'DNF': -1})
+        )
+        merged_df['Team_Place'] = pd.to_numeric(merged_df['Team_Place'], errors='coerce').fillna(-1).astype(int)
+        # merged_df['Team_Place'] = merged_df['Team_Place'].str.rstrip('.').astype(int)
+
         merged_df['Date'] = merged_df['Date'].astype(str)
         cols_to_keep = ['Date', 'Event_ID', 'Meet_ID', "Place", "Team_Place", "Time_Seconds", "id"]
         merged_df = merged_df[cols_to_keep]
