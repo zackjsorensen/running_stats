@@ -1,3 +1,6 @@
+import urllib
+
+from pandas import DataFrame
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -11,6 +14,8 @@ import pandas as pd
 from config import sb_key, sb_url
 from supabase import create_client, Client
 from selenium.webdriver.support import expected_conditions as EC
+from urllib.parse import quote
+
 
 
 # Takes in a list of tuples of events, and scrapes all of those events and puts the results in csvs, one per meet
@@ -107,8 +112,6 @@ def sel_scrape_event(url, meet_name, meet_id, event_name, event_id, location, ge
     df_list.append(df)
 
 
-
-
 def sel_scrape_meet(url, meet_name, meet_id, location, date):
     driver = set_up(url)
     anchors = driver.find_elements("tag name", "a")
@@ -123,7 +126,7 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
             links.append((anchor.text, anchor.get_attribute("href"), gender))
 
     df_list = []
-    for link in links[:5]:
+    for link in links:
 
 
         match = re.search(r'eventId=.*', link[1])
@@ -138,14 +141,13 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
                 r'[0-9a-fA-F]{12}'  # 12 hex digits
                 r'\b'  # word boundary
             )
-            # Example usage:
-            sample_text = "Here is a UUID: 550e8400-e29b-41d4-a716-446655440000 and another one."
             uuid_match = uuid_pattern.search(match.group(0))
 
             if uuid_match:
                 event_id = uuid_match.group(0)
             else:
-                event_id = None
+                continue
+
         sel_scrape_event(link[1], meet_name, meet_id, link[0], event_id, location, link[2], date, df_list)
 
     if df_list:
@@ -173,10 +175,57 @@ def process_year_doc(meet):
     pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
     meet_id = re.search(pattern1, meet[4])
     if not meet_id:
-        meet_id = re.search(r'\d{6,7}', meet[3])
+        meet_id = re.search(r'\d{6,7}', meet[4])
     date_str = meet[3].split("--")[-1].strip()
     date = datetime.strptime(date_str, "%B %d, %Y").date()
     return date, meet_id
+
+
+def escape(val):
+    if pd.isna(val):
+        return ""  # Avoid .eq.nan
+    val = str(val)
+    if val.endswith(".0"):  # Turn '2023.0' into '2023'
+        val = val[:-2]
+    # Replace special characters that mess up URL logic
+    return val.replace(",", "%2C").replace("&", "%26").replace("(", "%28").replace(")", "%29")
+
+
+from urllib.parse import quote
+
+def build_or_filter(df, match_cols):
+    clauses = []
+    for _, row in df.iterrows():
+        conditions = ",".join([
+            f"{col}.eq.{quote(str(row[col]), safe='')}"
+            for col in match_cols
+        ])
+        clauses.append(f"and({conditions})")
+    final_filter = ','.join(clauses)
+    return final_filter # Encode but preserve logical symbols
+
+def diff_2(scraped_athletes_df: DataFrame, supabase: Client):
+
+    from supabase import create_client, Client
+    match_cols = ['graduation_year', 'team', 'gender', 'name']
+    match_df = scraped_athletes_df[match_cols].copy()
+    match_df = match_df.dropna()
+
+    encoded_filter = build_or_filter(match_df, match_cols)
+    # print("Encoded filter: " + encoded_filter)
+    response = supabase.table("athlete").select("*").or_(encoded_filter).execute()
+
+    existing = pd.DataFrame(response.data)
+    if existing.empty:
+        return match_df  # None of the rows exist yet
+    # Anti-join to find new rows
+    merged = match_df.merge(existing[match_cols].drop_duplicates(),
+        on=match_cols,
+        how="left",
+        indicator=True)
+    new_rows = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
+    return new_rows
+
 
 
 def multiset_diff(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
@@ -241,57 +290,55 @@ def scrape_year(filename: str, batch_start: int, batch_end: int):
         res = supabase.table("athlete").select("*").execute()
         updated_athletes = pd.DataFrame(res.data)
         merged_df = pd.merge(meet_performances_df, updated_athletes, on= ['gender', 'name', 'team', 'graduation_year'], how = 'inner')
-        merged_df['graduation_year'] = merged_df['graduation_year'].astype('Int64')
-
-        merged_df['Place'] = merged_df['Place'].astype(str).str.strip()
-        merged_df['Team_Place'] = merged_df['Team_Place'].astype(str).str.strip()
-
-        merged_df['Place'] = merged_df['Place'].replace('DNS', -1)
-        merged_df['Team_Place'] = merged_df['Team_Place'].replace('DNS', -1)
-        merged_df['Place'] = (
-            merged_df['Place']
-            .astype(str)
-            .str.strip()
-            .str.rstrip('.')
-            .replace({'DNS': -1, 'DNF': -1})  # Add DNF too, just in case
-        )
-        merged_df['Place'] = pd.to_numeric(merged_df['Place'])
-
-        merged_df['Team_Place'] = (
-            merged_df['Team_Place']
-            .astype(str)
-            .str.strip()
-            .str.rstrip('.')
-            .replace({'': -1, 'DNS': -1, 'DNF': -1})
-        )
-        merged_df['Team_Place'] = pd.to_numeric(merged_df['Team_Place'], errors='coerce').fillna(-1).astype(int)
-        # merged_df['Team_Place'] = merged_df['Team_Place'].str.rstrip('.').astype(int)
-
-        merged_df['Date'] = merged_df['Date'].astype(str)
-        cols_to_keep = ['Date', 'Event_ID', 'Meet_ID', "Place", "Team_Place", "Time_Seconds", "id"]
-        merged_df = merged_df[cols_to_keep]
-        merged_df = merged_df.rename(columns = {
-            "Date": "date",
-            "Event_ID": "event_id",
-            "Meet_ID": "meet_id",
-            "Place": "place",
-            "Team_Place": "team_place",
-            "Time_Seconds": "time_seconds",
-            "id": "athlete_id"
-        })
-
-        merged_df = merged_df[np.isfinite(merged_df.select_dtypes(include=[np.number])).all(axis=1)]
+        merged_df = clean_df(merged_df)
 
 
-        records = merged_df.to_dict(orient="records")
-        print(merged_df.columns.tolist())
-
-        print(records[:3])
-        supabase.table("performance").insert(records).execute()
-
-
-
-scrape_year("2022_meets.json", 0, 2)
+        old_performance = supabase.table("performance").select("*").execute().data
+        new_perf = multiset_diff(merged_df, old_performance)
+        new_perf.drop_duplicates(inplace=True)
+        if not new_perf.empty:
+            records = new_perf.to_dict(orient="records")
+            supabase.table("performance").insert(records).execute()
 
 
+def clean_df(merged_df):
+    merged_df['graduation_year'] = merged_df['graduation_year'].astype('Int64')
+    merged_df['Place'] = merged_df['Place'].astype(str).str.strip()
+    merged_df['Team_Place'] = merged_df['Team_Place'].astype(str).str.strip()
+    merged_df['Place'] = merged_df['Place'].replace('DNS', -1)
+    merged_df['Team_Place'] = merged_df['Team_Place'].replace('DNS', -1)
+    merged_df['Place'] = (
+        merged_df['Place']
+        .astype(str)
+        .str.strip()
+        .str.rstrip('.')
+        .replace({'DNS': -1, 'DNF': -1})  # Add DNF too, just in case
+    )
+    merged_df['Place'] = pd.to_numeric(merged_df['Place'])
+    merged_df['Team_Place'] = (
+        merged_df['Team_Place']
+        .astype(str)
+        .str.strip()
+        .str.rstrip('.')
+        .replace({'': -1, 'DNS': -1, 'DNF': -1})
+    )
+    merged_df['Team_Place'] = pd.to_numeric(merged_df['Team_Place'], errors='coerce').fillna(-1).astype(int)
+    merged_df['Date'] = merged_df['Date'].astype(str)
+    cols_to_keep = ['Date', 'Event_ID', 'Meet_ID', "Place", "Team_Place", "Time_Seconds", "id"]
+    merged_df = merged_df[cols_to_keep]
+    merged_df = merged_df.rename(columns={
+        "Date": "date",
+        "Event_ID": "event_id",
+        "Meet_ID": "meet_id",
+        "Place": "place",
+        "Team_Place": "team_place",
+        "Time_Seconds": "time_seconds",
+        "id": "athlete_id"
+    })
+    merged_df = merged_df[np.isfinite(merged_df.select_dtypes(include=[np.number])).all(axis=1)]
+    return merged_df
+
+#
+# scrape_year("2021_meets.json", 2, 4)
+#
 
