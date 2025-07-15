@@ -288,32 +288,19 @@ def scrape_year(filename: str, batch_start: int, batch_end: int):
         date, meet_id = process_year_doc(meet)
 
         meet_performances_df, meet_athlete_df = sel_scrape_meet(url=meet[4], meet_name=meet[0], meet_id=meet_id.group(0), location=meet[2], date=date)
-        # find new athletes
+        # insert new athletes
         cols = ["name", "graduation_year", "team", "gender"]
-        new_athletes = multiset_diff(meet_athlete_df[cols], athlete_df[cols])
-        new_athletes.drop_duplicates(inplace=True)
-        if not new_athletes.empty:
+        trimmed_athletes_df = meet_athlete_df[cols]
+        payload = json.dumps(trimmed_athletes_df.to_dict(orient='records'))
+        supabase.rpc("insert_ignore_duplicates", {"rows_to_insert": json.loads(payload)}).execute()
 
-            new_athletes['graduation_year'] = new_athletes['graduation_year'].astype('Int64')
-            records = new_athletes.to_dict(orient="records")
-            supabase.table("athlete").insert(records).execute()
-        athlete_df = pd.DataFrame(
-            supabase.table("athlete").select("*").execute().data
-        )
-
-        sleep(2)
         res = supabase.table("athlete").select("*").execute()
         updated_athletes = pd.DataFrame(res.data)
         merged_df = pd.merge(meet_performances_df, updated_athletes, on= ['gender', 'name', 'team', 'graduation_year'], how = 'inner')
         merged_df = clean_df(merged_df)
 
-
-        old_performance = supabase.table("performance").select("*").execute().data
-        new_perf = multiset_diff(merged_df, old_performance)
-        new_perf.drop_duplicates(inplace=True)
-        if not new_perf.empty:
-            records = new_perf.to_dict(orient="records")
-            supabase.table("performance").insert(records).execute()
+        records = merged_df.to_dict(orient="records")
+        supabase.table("performance").insert(records).execute()
 
 
 def clean_df(merged_df):
@@ -329,7 +316,7 @@ def clean_df(merged_df):
         .str.rstrip('.')
         .replace({'DNS': -1, 'DNF': -1})  # Add DNF too, just in case
     )
-    merged_df['Place'] = pd.to_numeric(merged_df['Place'])
+    merged_df['Place'] = pd.to_numeric(merged_df['Place'], downcast='integer')
     merged_df['Team_Place'] = (
         merged_df['Team_Place']
         .astype(str)
@@ -354,6 +341,6 @@ def clean_df(merged_df):
     return merged_df
 
 #
-# scrape_year("2021_meets.json", 2, 4)
+scrape_year("2021_meets.json", 2, 4)
 #
 
