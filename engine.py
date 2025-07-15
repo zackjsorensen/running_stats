@@ -25,25 +25,26 @@ if __name__ == '__main__':
     target_athlete = supabase.table("athlete").select("id").eq('name', athlete_name).eq('graduation_year', grad_year).execute()
 
     athlete_id = target_athlete.data[0]['id']
+    # athlete_id = 783
     threshold = 10
 
-    response = supabase.rpc("find_similar_athletes_3", {
-        "target_athlete_id": athlete_id,
-        "time_threshold": threshold
+    response = supabase.rpc("find_similar_athletes_min_events_5", {
+        "target_id": athlete_id,
+        "time_threshold": threshold,
+        "min_event_matches": 1
     }).execute()
 
     if response.data:
         for athlete in response.data:
             print(
-                f"{athlete['name']} - Event: {athlete['event_id']} - Time: {athlete['time_seconds']}s - Δ: {athlete['delta']}")
+                f"{athlete['name']} - Event: {athlete['this_event_id']} - Time: {athlete['time_seconds']}s - Δ: {athlete['delta']}")
     else:
         print("No similar athletes found.")
 
     # use only data of the same gender
 
 
-# supabase doesn't support joins with python rn... so long term, we may want to figure that out...
-
+# how to handle when athletes have lots of data and other similar athletes don't have as much?
 
 
 

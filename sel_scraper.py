@@ -170,7 +170,6 @@ def sel_scrape_meet(url, meet_name, meet_id, location, date):
         return combined_df, athletes_df
 
 
-
 def process_year_doc(meet):
     pattern1 = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
     meet_id = re.search(pattern1, meet[4])
@@ -191,30 +190,47 @@ def escape(val):
     return val.replace(",", "%2C").replace("&", "%26").replace("(", "%28").replace(")", "%29")
 
 
-from urllib.parse import quote
-
 def build_or_filter(df, match_cols):
     clauses = []
     for _, row in df.iterrows():
         conditions = ",".join([
-            f"{col}.eq.{quote(str(row[col]), safe='')}"
+            f"{col}.eq.{quote(str(row[col]).strip(), safe='')}"
             for col in match_cols
         ])
         clauses.append(f"and({conditions})")
-    final_filter = ','.join(clauses)
-    return final_filter # Encode but preserve logical symbols
+    return ','.join(clauses) # Encode but preserve logical symbols)
+
+from urllib.parse import quote
+
+
 
 def diff_2(scraped_athletes_df: DataFrame, supabase: Client):
-
-    from supabase import create_client, Client
-    match_cols = ['graduation_year', 'team', 'gender', 'name']
+    """ goal is to return rows that need to be added to supabase"""
+    match_cols = ['team', 'name']
     match_df = scraped_athletes_df[match_cols].copy()
     match_df = match_df.dropna()
 
     encoded_filter = build_or_filter(match_df, match_cols)
-    # print("Encoded filter: " + encoded_filter)
+    print("Encoded filter: " + encoded_filter)
     response = supabase.table("athlete").select("*").or_(encoded_filter).execute()
+    # -----------------------------------------------------------
+    from urllib.parse import quote
 
+    def build_filter_pairwise(df, cols):
+        clauses = []
+        for _, row in df.iterrows():
+            parts = []
+            for col in cols:
+                val = quote(str(row[col]).strip(), safe='')
+                parts.append(f"{col}.eq.{val}")
+            clause = f"and({','.join(parts)})"
+            clauses.append(clause)
+        return ",".join(clauses)
+
+    filter_string = build_filter_pairwise(match_df, ['team', 'name'])
+    response = supabase.table("athlete").select("*").or_(filter_string).execute()
+
+    # ------------------------------------------------------------
     existing = pd.DataFrame(response.data)
     if existing.empty:
         return match_df  # None of the rows exist yet
@@ -225,7 +241,6 @@ def diff_2(scraped_athletes_df: DataFrame, supabase: Client):
         indicator=True)
     new_rows = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
     return new_rows
-
 
 
 def multiset_diff(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
